@@ -19,6 +19,7 @@ struct SessionPanel: View {
 
     @Environment(AppModel.self) private var appModel
     private var session: QuestionSession { appModel.session }
+    private var isVisible: Bool { session.phase == .countdown || session.phase == .playing }
 
     var body: some View {
         VStack(spacing: 18) {
@@ -35,7 +36,7 @@ struct SessionPanel: View {
                 if let question = session.current {
                     playing(question)
                 }
-            case .ready, .finished:
+            default:
                 EmptyView()
             }
         }
@@ -43,6 +44,9 @@ struct SessionPanel: View {
         .frame(width: Self.frameSize.width)
         .glassBackgroundEffect(in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .frame(width: Self.frameSize.width, height: Self.frameSize.height, alignment: .bottom)
+        // Only part of the office: hidden (and not tappable) during the lake rests.
+        .opacity(isVisible ? 1 : 0)
+        .allowsHitTesting(isVisible)
         .animation(.smooth(duration: 0.3), value: session.phase)
     }
 
@@ -84,6 +88,8 @@ struct SessionPanel: View {
                             .font(.title3.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
+                    InterviewTimeLeft(seconds: session.interviewSecondsRemaining)
+                        .font(.title3.weight(.medium))
                 }
                 Spacer(minLength: 0)
             }

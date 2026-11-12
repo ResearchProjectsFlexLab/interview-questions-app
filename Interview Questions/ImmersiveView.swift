@@ -22,6 +22,9 @@ struct ImmersiveView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissImmersiveSpace) private var dismissImmersiveSpace
     @State private var interviewer: Entity?
+    @State private var office: Entity?
+    @State private var lake: LakeScene?
+    @State private var frameUpdates: EventSubscription?
 
     private var session: QuestionSession { appModel.session }
 
@@ -30,9 +33,43 @@ struct ImmersiveView: View {
             let room = InterviewRoom.make()
             content.add(room.root)
             interviewer = room.interviewer
+            office = room.root
             if let light = await InterviewRoom.makeAmbientLight() {
                 room.root.components.set(light)
             }
+
+            // The moonlit lake for the instructions and both rests; the office for the
+            // interview. The two cross-fade as the session moves between them.
+            let lakeScene = LakeScene()
+            let lakeRoot = lakeScene.root
+            content.add(lakeRoot)
+            lake = lakeScene
+            // Animate the moon's glow, ripples and fireflies every frame, as in the original app.
+            let session = self.session
+            frameUpdates = content.subscribe(to: SceneEvents.Update.self) { _ in
+                if lakeRoot.components[OpacityComponent.self]?.opacity ?? 1 > 0.001 {
+                    lakeScene.update(session: session, now: .now)
+                }
+            }
+            let showsOffice = Self.showsOffice(session.phase)
+            room.root.components.set(OpacityComponent(opacity: showsOffice ? 1 : 0))
+            room.root.components.set(FadeComponent(target: showsOffice ? 1 : 0))
+            lakeRoot.components.set(OpacityComponent(opacity: showsOffice ? 0 : 1))
+            lakeRoot.components.set(FadeComponent(target: showsOffice ? 0 : 1))
+
+            if let card = attachments.entity(for: BaselineInstructionsCard.attachmentID) {
+                card.position = [0, 1.15, -1.6]
+                lakeRoot.addChild(card)
+            }
+            if let hud = attachments.entity(for: RestHUD.attachmentID) {
+                hud.position = [0, 0.95, -2.6]
+                lakeRoot.addChild(hud)
+            }
+            if let stop = attachments.entity(for: RestStopButton.attachmentID) {
+                stop.position = [0, 0.62, -2.6]
+                lakeRoot.addChild(stop)
+            }
+            updateScenes(for: session.phase)
 
             // Layout around the interviewer's head (mouth ≈ 1.27 m, centred on x = 0).
             // Attachments are measured in points; ~1360 pt make one metre.
@@ -70,16 +107,47 @@ struct ImmersiveView: View {
                 SessionPanel()
                     .environment(appModel)
             }
+            // Shown only in their own phases, as in the original app.
+            Attachment(id: BaselineInstructionsCard.attachmentID) {
+                BaselineInstructionsCard(session: session)
+                    .opacity(session.phase == .instructions ? 1 : 0)
+                    .allowsHitTesting(session.phase == .instructions)
+            }
+            Attachment(id: RestHUD.attachmentID) {
+                RestHUD(session: session)
+                    .opacity(session.phase.isRest ? 1 : 0)
+            }
+            Attachment(id: RestStopButton.attachmentID) {
+                RestStopButton(session: session)
+                    .opacity(session.phase.isRest ? 1 : 0)
+                    .allowsHitTesting(session.phase.isRest)
+            }
         }
         // The main window is hidden while in the room, so the room keeps the timer ticking.
         .onReceive(clock) { date in
             session.refresh(at: date)
         }
         .onChange(of: session.index) { nod() }
+        // Speak each new line (greeting, every question, closing) as it appears in the bubble.
+        .onChange(of: bubbleKey, initial: true) { speakBubble() }
         .onChange(of: session.phase) { _, phase in
-            if phase == .playing || phase == .finished { nod() }
+            updateScenes(for: phase)
+            if phase == .playing || phase == .recovery { nod() }
             if phase == .finished { Task { await leaveRoom() } }
         }
+    }
+
+    /// The office shows for the countdown and the interview; the lake for everything else.
+    private static func showsOffice(_ phase: QuestionSession.Phase) -> Bool {
+        phase == .countdown || phase == .playing
+    }
+
+    private func updateScenes(for phase: QuestionSession.Phase) {
+        let showsOffice = Self.showsOffice(phase)
+        office?.components.set(FadeComponent(target: showsOffice ? 1 : 0))
+        lake?.root.components.set(FadeComponent(target: showsOffice ? 0 : 1))
+        // The office lights only matter in the office (the lake is unlit, as in the original app).
+        office?.findEntity(named: "officeLights")?.isEnabled = showsOffice
     }
 
     private let clock = Timer.publish(every: 0.1, tolerance: 0.02, on: .main, in: .common).autoconnect()
@@ -101,10 +169,14 @@ struct ImmersiveView: View {
     /// What the interviewer is "saying" right now.
     private var bubbleText: String? {
         switch session.phase {
-        case .ready:     return nil
-        case .countdown: return "Thanks for coming in today. Let's begin."
-        case .playing:   return session.current?.prompt
-        case .finished:  return "Thank you, that's everything for today."
+        case .ready, .instructions, .baseline, .finished:
+            return nil
+        case .countdown:
+            return "Thanks for coming in today. Let's begin."
+        case .playing:
+            return session.current?.prompt
+        case .recovery:
+            return "Thank you, that's everything for today."
         }
     }
 
@@ -113,6 +185,14 @@ struct ImmersiveView: View {
         switch session.phase {
         case .playing: return "q\(session.index)"
         default:       return "\(session.phase)"
+        }
+    }
+
+    private func speakBubble() {
+        if let line = bubbleText {
+            appModel.interviewerVoice.say(line)
+        } else {
+            appModel.interviewerVoice.stop()
         }
     }
 
@@ -394,12 +474,17 @@ enum InterviewRoom {
     // MARK: Lights
 
     private static func addLights(to root: Entity) {
+        // Grouped so they can be switched off while the lake is showing.
+        let lights = Entity()
+        lights.name = "officeLights"
+        root.addChild(lights)
+
         // Daylight coming in from the window, slightly from above.
         let sun = Entity()
         sun.components.set(DirectionalLightComponent(color: .init(red: 1, green: 0.97, blue: 0.92, alpha: 1),
                                                      intensity: 2600))
         sun.look(at: [0.5, 0, 1.5], from: [0, 3, -4], relativeTo: nil)
-        root.addChild(sun)
+        lights.addChild(sun)
 
         // Ceiling lights.
         for p: SIMD3<Float> in [[-1.6, 2.7, -2.6], [1.6, 2.7, -2.6], [0, 2.7, -0.6], [0, 2.7, 1.4]] {
@@ -407,7 +492,7 @@ enum InterviewRoom {
             lamp.position = p
             lamp.components.set(PointLightComponent(color: .init(red: 1, green: 0.96, blue: 0.9, alpha: 1),
                                                     intensity: 18000, attenuationRadius: 6))
-            root.addChild(lamp)
+            lights.addChild(lamp)
         }
     }
 
@@ -731,16 +816,6 @@ enum InterviewRoom {
     }
 }
 
-/// Deterministic random numbers so the room looks the same every time.
-private struct SeededRandom {
-    private var state: UInt64
-    init(seed: UInt64) { state = seed &+ 0x9E3779B97F4A7C15 }
-    mutating func next(in range: ClosedRange<Double>) -> Double {
-        state = state &* 6364136223846793005 &+ 1442695040888963407
-        let unit = Double(state >> 11) / Double(1 << 53)
-        return range.lowerBound + (range.upperBound - range.lowerBound) * unit
-    }
-}
 
 #Preview(immersionStyle: .full) {
     ImmersiveView()

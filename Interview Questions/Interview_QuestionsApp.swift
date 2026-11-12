@@ -16,6 +16,8 @@ struct Interview_QuestionsApp: App {
     init() {
         InterviewerComponent.registerComponent()
         InterviewerSystem.registerSystem()
+        FadeComponent.registerComponent()
+        FadeSystem.registerSystem()
     }
 
     var body: some SwiftUI.Scene {

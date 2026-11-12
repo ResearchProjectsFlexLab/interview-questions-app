@@ -108,6 +108,14 @@ struct ContentView: View {
                 switch session.phase {
                 case .ready:
                     readyStage
+                case .instructions:
+                    // Only seen here if the room couldn't open; normally it's by the lake.
+                    BaselineInstructionsCard(session: session, inWindow: true)
+                case .baseline, .recovery:
+                    VStack(spacing: 18) {
+                        RecordingBadge()
+                        WindowRestView(session: session)
+                    }
                 case .countdown:
                     countdownStage
                 case .playing:
@@ -137,7 +145,7 @@ struct ContentView: View {
                     .font(.system(size: 32, weight: .medium, design: .serif))
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Answer out loud. You have twenty seconds for each one.")
+                Text("Answer out loud. You have twenty seconds for each one, and the interview ends after three minutes. You'll relax by a moonlit lake for a minute before and after.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -147,6 +155,10 @@ struct ContentView: View {
                 stat(value: "\(session.questions.count)", caption: "Questions")
                 statDivider
                 stat(value: "20s", caption: "Each")
+                statDivider
+                stat(value: "3 min", caption: "Total")
+                statDivider
+                stat(value: "1 + 1 min", caption: "Rest")
                 statDivider
                 stat(value: "1–\(session.questions.count)", caption: "Difficulty")
             }
@@ -204,6 +216,8 @@ struct ContentView: View {
                         Text(question.tier.title)
                             .font(.subheadline.weight(.semibold))
                     }
+                    InterviewTimeLeft(seconds: session.interviewSecondsRemaining)
+                        .font(.subheadline.weight(.medium))
                 }
 
                 // In the interview room the question is spoken in the interviewer's
@@ -348,6 +362,25 @@ struct RecordingBadge: View {
     }
 }
 
+/// "2:45 left" for the whole interview; turns orange in the last 30 seconds.
+struct InterviewTimeLeft: View {
+    var seconds: Int
+
+    var body: some View {
+        let urgent = seconds <= 30
+        Label {
+            Text("\(seconds / 60):\(String(format: "%02d", seconds % 60)) left")
+                .monospacedDigit()
+                .contentTransition(.numericText(countsDown: true))
+                .animation(.snappy, value: seconds)
+        } icon: {
+            Image(systemName: "hourglass")
+        }
+        .foregroundStyle(urgent ? StageStyle.urgent : Color.secondary)
+        .accessibilityLabel("\(seconds / 60) minutes \(seconds % 60) seconds left in the interview")
+    }
+}
+
 enum StageStyle {
     static let accent = Color(red: 0.33, green: 0.42, blue: 0.96)
     static let urgent = Color(red: 0.92, green: 0.42, blue: 0.28)
@@ -376,6 +409,10 @@ private struct RoundProgress: View {
         switch phase {
         case .ready:
             "Ready to start, \(count) questions"
+        case .instructions, .baseline:
+            "Resting before the interview"
+        case .recovery:
+            "Resting after the interview"
         case .countdown:
             "Starting, \(count) questions"
         case .playing:
@@ -387,8 +424,10 @@ private struct RoundProgress: View {
 
     private func fill(for item: Int) -> Color {
         switch phase {
-        case .ready, .countdown:
+        case .ready, .instructions, .baseline, .countdown:
             Color.primary.opacity(0.28)
+        case .recovery:
+            StageStyle.accent.opacity(0.55)
         case .finished:
             StageStyle.accent
         case .playing where item < index:
